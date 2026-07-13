@@ -345,10 +345,4 @@ Through this project I learned how to:
 Senior Data Engineer
 
 - LinkedIn: https://linkedin.com/in/ayomikun-adaramola
-- GitHub: https://github.com/Stephen-delAyo
-
----
-
-## License
-
-This project is licensed under the MIT License.
+- GitHub: https://github.com/ayomikunadaramola
