@@ -26,26 +26,44 @@ The pipeline follows the ETL architecture commonly used in production Data Engin
 ## Architecture
 
 ```
-            ExchangeRate API
-                   │
-                   ▼
-          Extract JSON Response
-                   │
-                   ▼
-        Transform & Clean Data
-          (Pandas DataFrame)
-                   │
-                   ▼
-          Validate Data Quality
-                   │
-                   ▼
-         Export Clean CSV File
-                   │
-                   ▼
-       Load into PostgreSQL Database
-                   │
-                   ▼
-        Verify Database Load
+                    Data Pipeline Architecture
+
+┌─────────────────┐
+
+   Exchange Rate API
+      (Data Source)
+
+└─────────────────┘
+          │
+          ▼
+
+┌────────────────────────────────────────────────────────────┐
+
+   📥 Extract               🔄 Transform               📤 Load
+
+• Python Requests      • Pandas DataFrame        • PostgreSQL
+• REST API Call        • Data Cleaning           • SQLAlchemy
+• JSON Extraction      • Validation              • Database Load
+                       • Feature Engineering
+
+└────────────────────────────────────────────────────────────┘
+          │
+          ▼
+
+┌─────────────────┐
+
+ PostgreSQL Database
+   (Data Destination)
+
+└─────────────────┘
+          │
+          ▼
+
+      SQL Analysis
+          │
+          ▼
+
+    Business Insights
 ```
 
 ---
