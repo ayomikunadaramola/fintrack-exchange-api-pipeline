@@ -1,0 +1,356 @@
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+from sqlalchemy import URL, create_engine, text
+from sqlalchemy.engine import Engine
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw_data"
+CLEANED_DATA_DIR = PROJECT_ROOT / "data" / "cleaned_data"
+ENV_PATH = PROJECT_ROOT / ".env"
+
+BASE_CURRENCY = "USD"
+API_URL = f"https://open.er-api.com/v6/latest/{BASE_CURRENCY}"
+
+
+def extract_data(api_url: str) -> dict:
+    """Extract exchange-rate data from the API."""
+
+    try:
+        response = requests.get(api_url, timeout=30)
+        response.raise_for_status()
+        api_data = response.json()
+
+    except requests.exceptions.Timeout as error:
+        raise RuntimeError("The API request timed out.") from error
+
+    except requests.exceptions.ConnectionError as error:
+        raise RuntimeError("A network connection error occurred.") from error
+
+    except requests.exceptions.HTTPError as error:
+        raise RuntimeError(
+            f"The API returned an HTTP error: {error}"
+        ) from error
+
+    except requests.exceptions.JSONDecodeError as error:
+        raise RuntimeError(
+            "The API response could not be converted to JSON."
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise RuntimeError(
+            f"The API request failed: {error}"
+        ) from error
+
+    if api_data.get("result") != "success":
+        raise RuntimeError(
+            f"The API returned an unsuccessful result: {api_data}"
+        )
+
+    if "rates" not in api_data:
+        raise KeyError("The API response does not contain a 'rates' field.")
+
+    return api_data
+
+
+def save_raw_json(api_data: dict, extracted_at: datetime) -> Path:
+    """Save the original API response as a timestamped JSON file."""
+
+    RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    raw_file_path = RAW_DATA_DIR / (
+        f"exchange_rates_{extracted_at:%Y%m%d_%H%M%S}.json"
+    )
+
+    with raw_file_path.open("w", encoding="utf-8") as file:
+        json.dump(api_data, file, indent=4)
+
+    return raw_file_path
+
+
+def transform_data(
+    api_data: dict,
+    extracted_at: datetime
+) -> pd.DataFrame:
+    """Transform the API JSON response into a clean DataFrame."""
+
+    rates = api_data["rates"]
+
+    exchange_rates = pd.DataFrame(
+        list(rates.items()),
+        columns=["currency_code", "exchange_rate"]
+    )
+
+    exchange_rates["base_currency"] = api_data["base_code"]
+    exchange_rates["retrieved_at"] = pd.to_datetime(
+        api_data["time_last_update_utc"],
+        utc=True,
+        errors="coerce"
+    )
+    exchange_rates["extracted_at"] = pd.Timestamp(extracted_at)
+
+    exchange_rates = exchange_rates[
+        [
+            "base_currency",
+            "currency_code",
+            "exchange_rate",
+            "retrieved_at",
+            "extracted_at"
+        ]
+    ]
+
+    exchange_rates["base_currency"] = (
+        exchange_rates["base_currency"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    exchange_rates["currency_code"] = (
+        exchange_rates["currency_code"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    exchange_rates["exchange_rate"] = pd.to_numeric(
+        exchange_rates["exchange_rate"],
+        errors="coerce"
+    )
+
+    exchange_rates = exchange_rates.dropna(
+        subset=[
+            "base_currency",
+            "currency_code",
+            "exchange_rate",
+            "retrieved_at",
+            "extracted_at"
+        ]
+    )
+
+    exchange_rates = exchange_rates[
+        exchange_rates["exchange_rate"] > 0
+    ].copy()
+
+    exchange_rates = exchange_rates.drop_duplicates(
+        subset=[
+            "base_currency",
+            "currency_code",
+            "retrieved_at"
+        ]
+    )
+
+    return exchange_rates.reset_index(drop=True)
+
+
+def validate_data(dataframe: pd.DataFrame) -> None:
+    """Validate the transformed exchange-rate DataFrame."""
+
+    required_columns = {
+        "base_currency",
+        "currency_code",
+        "exchange_rate",
+        "retrieved_at",
+        "extracted_at"
+    }
+
+    missing_columns = required_columns - set(dataframe.columns)
+
+    if missing_columns:
+        raise ValueError(
+            f"Required columns are missing: {sorted(missing_columns)}"
+        )
+
+    if dataframe.empty:
+        raise ValueError("The transformed DataFrame is empty.")
+
+    if dataframe[list(required_columns)].isnull().any().any():
+        raise ValueError("The DataFrame contains missing required values.")
+
+    if dataframe["currency_code"].duplicated().any():
+        raise ValueError("Duplicate currency codes were found.")
+
+    if not (dataframe["exchange_rate"] > 0).all():
+        raise ValueError("One or more exchange rates are not positive.")
+
+    invalid_codes = dataframe[
+        dataframe["currency_code"].str.len() != 3
+    ]
+
+    if not invalid_codes.empty:
+        raise ValueError(
+            "One or more currency codes do not contain three characters."
+        )
+
+
+def save_cleaned_csv(dataframe: pd.DataFrame) -> Path:
+    """Save the cleaned DataFrame as a CSV file."""
+
+    CLEANED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    cleaned_file_path = (
+        CLEANED_DATA_DIR / "exchange_rates_cleaned.csv"
+    )
+
+    dataframe.to_csv(cleaned_file_path, index=False)
+
+    return cleaned_file_path
+
+
+def create_database_engine() -> Engine:
+    """Create and return a SQLAlchemy PostgreSQL engine."""
+
+    load_dotenv(ENV_PATH, override=True)
+
+    required_variables = [
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_HOST",
+        "DB_PORT",
+        "DB_NAME"
+    ]
+
+    missing_variables = [
+        variable
+        for variable in required_variables
+        if not os.getenv(variable)
+    ]
+
+    if missing_variables:
+        raise ValueError(
+            "Missing database environment variables: "
+            f"{missing_variables}"
+        )
+
+    database_url = URL.create(
+        drivername="postgresql+psycopg2",
+        username=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        database=os.getenv("DB_NAME")
+    )
+
+    return create_engine(
+        database_url,
+        pool_pre_ping=True
+    )
+
+
+def test_database_connection(engine: Engine) -> None:
+    """Test the PostgreSQL connection."""
+
+    with engine.connect() as connection:
+        result = connection.execute(
+            text(
+                """
+                SELECT
+                    current_database(),
+                    current_user,
+                    version();
+                """
+            )
+        )
+
+        database_name, database_user, version = result.fetchone()
+
+    print("PostgreSQL connection successful.")
+    print(f"Database: {database_name}")
+    print(f"User: {database_user}")
+    print(f"Version: {version}")
+
+
+def load_data(
+    dataframe: pd.DataFrame,
+    engine: Engine,
+    table_name: str = "exchange_rates"
+) -> None:
+    """Load the cleaned DataFrame into PostgreSQL."""
+
+    dataframe.to_sql(
+        name=table_name,
+        con=engine,
+        if_exists="replace",
+        index=False,
+        method="multi",
+        chunksize=500
+    )
+
+
+def verify_database_load(
+    dataframe: pd.DataFrame,
+    engine: Engine,
+    table_name: str = "exchange_rates"
+) -> None:
+    """Verify that PostgreSQL contains the expected number of rows."""
+
+    query = text(
+        f"SELECT COUNT(*) AS total_rows FROM {table_name};"
+    )
+
+    with engine.connect() as connection:
+        database_rows = connection.execute(query).scalar_one()
+
+    dataframe_rows = len(dataframe)
+
+    print(f"DataFrame rows: {dataframe_rows}")
+    print(f"PostgreSQL rows: {database_rows}")
+
+    if database_rows != dataframe_rows:
+        raise RuntimeError(
+            "The DataFrame and PostgreSQL row counts do not match."
+        )
+
+    print("Database load verification successful.")
+
+
+def run_pipeline() -> None:
+    """Run the complete exchange-rate ETL pipeline."""
+
+    extracted_at = datetime.now(timezone.utc)
+
+    print("1. Extracting exchange-rate data...")
+    api_data = extract_data(API_URL)
+
+    print("2. Saving raw JSON response...")
+    raw_path = save_raw_json(api_data, extracted_at)
+    print(f"Raw file saved to: {raw_path}")
+
+    print("3. Transforming the API response...")
+    exchange_rates = transform_data(
+        api_data,
+        extracted_at
+    )
+
+    print("4. Validating the transformed data...")
+    validate_data(exchange_rates)
+
+    print("5. Saving the cleaned CSV file...")
+    cleaned_path = save_cleaned_csv(exchange_rates)
+    print(f"Cleaned file saved to: {cleaned_path}")
+
+    print("6. Creating the PostgreSQL engine...")
+    engine = create_database_engine()
+
+    print("7. Testing the PostgreSQL connection...")
+    test_database_connection(engine)
+
+    print("8. Loading the data into PostgreSQL...")
+    load_data(exchange_rates, engine)
+
+    print("9. Verifying the PostgreSQL load...")
+    verify_database_load(exchange_rates, engine)
+
+    print("FinTrack ETL pipeline completed successfully.")
+
+
+if __name__ == "__main__":
+    run_pipeline()
