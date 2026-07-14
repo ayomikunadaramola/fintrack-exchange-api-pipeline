@@ -364,3 +364,7 @@ Senior Data Engineer
 
 - LinkedIn: https://linkedin.com/in/ayomikun-adaramola
 - GitHub: https://github.com/ayomikunadaramola
+
+# License
+
+This project is released under the MIT License.
