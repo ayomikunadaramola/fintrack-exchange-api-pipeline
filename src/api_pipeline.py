@@ -1,3 +1,15 @@
+"""
+This script will: 
+Extract API data
+→ save the raw JSON
+→ transform it into a DataFrame
+→ clean and validate it
+→ save the cleaned CSV
+→ connect to PostgreSQL
+→ load the table
+→ verify the row count
+"""
+
 from __future__ import annotations
 
 import json
